@@ -863,7 +863,7 @@ namespace MediaBrowser.MediaEncoding.Probing
                 {
                     stream.IsAnamorphic = false;
                 }
-                else if (string.Equals(streamInfo.SampleAspectRatio, "1:1", StringComparison.Ordinal))
+                else if (IsNearSquarePixelSar(streamInfo.SampleAspectRatio))
                 {
                     stream.IsAnamorphic = false;
                 }
@@ -968,44 +968,55 @@ namespace MediaBrowser.MediaEncoding.Probing
                 return null;
             }
 
-            int bitrate = 0;
+            // Get stream bitrate
+            var bitrate = 0;
 
-            // Extract bitrate from "BPS" tag (FFPROBE per-stream data rate)
-            if (streamInfo.CodecType == CodecType.Audio || streamInfo.CodecType == CodecType.Video)
+            if (int.TryParse(streamInfo.BitRate, CultureInfo.InvariantCulture, out var value))
             {
-                bitrate = GetBPSFromTags(streamInfo);
+                bitrate = value;
             }
 
-            // FALLBACK Calculate BPS from total bytes and duration tags
-            if (bitrate <= 0)
+            // The bitrate info of FLAC musics and some videos is included in formatInfo.
+            if (bitrate == 0
+                && formatInfo is not null
+                && (stream.Type == MediaStreamType.Video || (isAudio && stream.Type == MediaStreamType.Audio)))
             {
-                var durationInSeconds = GetRuntimeSecondsFromTags(streamInfo);
-                var bytes = GetNumberOfBytesFromTags(streamInfo);
-
-                if (durationInSeconds is { } dur && dur >= 1 && bytes is { } totalBytes)
+                // If the stream info doesn't have a bitrate get the value from the media format info
+                if (int.TryParse(formatInfo.BitRate, CultureInfo.InvariantCulture, out value))
                 {
-                    bitrate = Convert.ToInt32(totalBytes * 8 / dur, CultureInfo.InvariantCulture);
-                }
-            }
-
-            // FALLBACK B: Use the standard stream bitrate field
-            if (bitrate <= 0 && int.TryParse(streamInfo.BitRate, CultureInfo.InvariantCulture, out var streamVal))
-            {
-                bitrate = streamVal;
-            }
-
-            // FALLBACK C: Use the global format info (useful for FLAC or single-stream containers)
-            if (bitrate <= 0 && formatInfo != null)
-            {
-                if (int.TryParse(formatInfo.BitRate, CultureInfo.InvariantCulture, out var formatVal))
-                {
-                    bitrate = formatVal;
+                    bitrate = value;
                 }
             }
 
             if (bitrate > 0)
             {
                 stream.BitRate = bitrate;
+            }
+
+            // Extract bitrate info from tag "BPS" if possible.
+            if (!stream.BitRate.HasValue
+                && (streamInfo.CodecType == CodecType.Audio
+                    || streamInfo.CodecType == CodecType.Video))
+            {
+                var bps = GetBPSFromTags(streamInfo);
+                if (bps > 0)
+                {
+                    stream.BitRate = bps;
+                }
+                else
+                {
+                    // Get average bitrate info from tag "NUMBER_OF_BYTES" and "DURATION" if possible.
+                    var durationInSeconds = GetRuntimeSecondsFromTags(streamInfo);
+                    var bytes = GetNumberOfBytesFromTags(streamInfo);
+                    if (durationInSeconds is not null && durationInSeconds.Value >= 1 && bytes is not null)
+                    {
+                        bps = Convert.ToInt32(bytes * 8 / durationInSeconds, CultureInfo.InvariantCulture);
+                        if (bps > 0)
+                        {
+                            stream.BitRate = bps;
+                        }
+                    }
+                }
             }
 
             var disposition = streamInfo.Disposition;
@@ -1144,6 +1155,34 @@ namespace MediaBrowser.MediaEncoding.Probing
         }
 
         /// <summary>
+        /// Determines whether a sample aspect ratio represents square (or near-square) pixels.
+        /// Some encoders produce SARs like 3201:3200 for content that is effectively 1:1,
+        /// which would be falsely classified as anamorphic by an exact string comparison.
+        /// A 1% tolerance safely covers encoder rounding artifacts while preserving detection
+        /// of genuine anamorphic content (closest standard is PAL 4:3 at 16:15 = 6.67% off).
+        /// </summary>
+        /// <param name="sar">The sample aspect ratio string in "N:D" format.</param>
+        /// <returns><c>true</c> if the SAR is within 1% of 1:1; otherwise <c>false</c>.</returns>
+        internal static bool IsNearSquarePixelSar(string sar)
+        {
+            if (string.IsNullOrEmpty(sar))
+            {
+                return false;
+            }
+
+            var parts = sar.Split(':');
+            if (parts.Length == 2
+                && double.TryParse(parts[0], CultureInfo.InvariantCulture, out var num)
+                && double.TryParse(parts[1], CultureInfo.InvariantCulture, out var den)
+                && den > 0)
+            {
+                return IsClose(num / den, 1.0, 0.01);
+            }
+
+            return string.Equals(sar, "1:1", StringComparison.Ordinal);
+        }
+
+        /// <summary>
         /// Gets a frame rate from a string value in ffprobe output
         /// This could be a number or in the format of 2997/125.
         /// </summary>
@@ -1196,21 +1235,20 @@ namespace MediaBrowser.MediaEncoding.Probing
             }
         }
 
-        private static int GetBPSFromTags(MediaStreamInfo streamInfo)
+        private static int? GetBPSFromTags(MediaStreamInfo streamInfo)
         {
             if (streamInfo?.Tags is null)
             {
-                return 0;
+                return null;
             }
 
             var bps = GetDictionaryValue(streamInfo.Tags, "BPS-eng") ?? GetDictionaryValue(streamInfo.Tags, "BPS");
-
             if (int.TryParse(bps, NumberStyles.Integer, CultureInfo.InvariantCulture, out var parsedBps))
             {
                 return parsedBps;
             }
 
-            return 0;
+            return null;
         }
 
         private static double? GetRuntimeSecondsFromTags(MediaStreamInfo streamInfo)
