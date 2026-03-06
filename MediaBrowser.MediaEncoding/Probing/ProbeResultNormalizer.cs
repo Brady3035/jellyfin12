@@ -970,10 +970,18 @@ namespace MediaBrowser.MediaEncoding.Probing
 
             int bitrate = 0;
 
-            // Extract bitrate from "BPS" tag (FFPROBE per-stream data rate)
-            if (streamInfo.CodecType == CodecType.Audio || streamInfo.CodecType == CodecType.Video)
+            // Extract bitrate from "BPS" tag (FFPROBE per-stream data rate), only for Matroska.
+            if ((streamInfo.CodecType == CodecType.Audio || streamInfo.CodecType == CodecType.Video)
+                && formatInfo?.FormatName is not null
+                && formatInfo.FormatName.Contains("matroska", StringComparison.OrdinalIgnoreCase))
             {
                 bitrate = GetBPSFromTags(streamInfo);
+            }
+
+            // Use the standard stream bitrate field
+            if (bitrate <= 0 && int.TryParse(streamInfo.BitRate, CultureInfo.InvariantCulture, out var streamVal))
+            {
+                bitrate = streamVal;
             }
 
             // FALLBACK Calculate BPS from total bytes and duration tags
@@ -988,13 +996,7 @@ namespace MediaBrowser.MediaEncoding.Probing
                 }
             }
 
-            // FALLBACK B: Use the standard stream bitrate field
-            if (bitrate <= 0 && int.TryParse(streamInfo.BitRate, CultureInfo.InvariantCulture, out var streamVal))
-            {
-                bitrate = streamVal;
-            }
-
-            // FALLBACK C: Use the global format info (useful for FLAC or single-stream containers)
+            // Use the global format info (useful for FLAC or single-stream containers)
             if (bitrate <= 0 && formatInfo != null)
             {
                 if (int.TryParse(formatInfo.BitRate, CultureInfo.InvariantCulture, out var formatVal))
